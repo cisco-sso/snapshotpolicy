@@ -1,0 +1,19 @@
+{{- if and .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app: {{ template "snapshotpolicy.name" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    heritage: {{ .Release.Service }}
+    release: {{ .Release.Name }}
+  name: {{ template "snapshotpolicy.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ template "snapshotpolicy.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "snapshotpolicy.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end -}}

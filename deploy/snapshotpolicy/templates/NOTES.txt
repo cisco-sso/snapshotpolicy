@@ -1,0 +1,2 @@
+1. A new CRD is available.  snapshotpolicy / snapshotpolicies
+2. The service is scheduled and will watch snapshotpolicy objects.

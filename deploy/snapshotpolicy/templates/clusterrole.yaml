@@ -1,0 +1,36 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  labels:
+    app: {{ template "snapshotpolicy.name" . }}
+    chart: {{ template "snapshotpolicy.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  name: {{ template "snapshotpolicy.fullname" . }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "snapshotpolicy.ciscosso.io"
+    resources:
+      - snapshotpolicies
+    verbs:
+      # I manage Snapshot Policies
+      - "*"
+  - apiGroups:
+      - "volumesnapshot.external-storage.k8s.io"
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - create
+      - delete
+{{- end -}}

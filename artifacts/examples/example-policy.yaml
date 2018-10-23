@@ -1,0 +1,12 @@
+apiVersion: snapshotpolicy.ciscosso.io/v1alpha1
+kind: snapshotpolicy
+metadata:
+  name: demo-pvc-policy
+spec:
+  claims:
+  - demo-pvc
+  unit: minute
+  period: 1
+  retention: 3
+  strategy:
+    name: inuse
