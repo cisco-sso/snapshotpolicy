@@ -21,6 +21,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -90,8 +91,23 @@ func (in *SnapshotPolicySpec) DeepCopyInto(out *SnapshotPolicySpec) {
 	*out = *in
 	if in.PVCNames != nil {
 		in, out := &in.PVCNames, &out.PVCNames
-		*out = make([]string, len(*in))
-		copy(*out, *in)
+		*out = new([]string)
+		if **in != nil {
+			in, out := *in, *out
+			*out = make([]string, len(*in))
+			copy(*out, *in)
+		}
+	}
+	if in.PVCLabelSelectors != nil {
+		in, out := &in.PVCLabelSelectors, &out.PVCLabelSelectors
+		*out = new([]v1.LabelSelector)
+		if **in != nil {
+			in, out := *in, *out
+			*out = make([]v1.LabelSelector, len(*in))
+			for i := range *in {
+				(*in)[i].DeepCopyInto(&(*out)[i])
+			}
+		}
 	}
 	if in.Period != nil {
 		in, out := &in.Period, &out.Period
