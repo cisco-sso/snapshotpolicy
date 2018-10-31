@@ -27,9 +27,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -62,6 +64,13 @@ type controller struct {
 	recorder record.EventRecorder
 	// Map of `units` specified in snapshot policy to time.Duration representation
 	durationMap map[string]time.Duration
+
+	// Shared informer factory for informers and listers below
+	kfac kubeinformers.SharedInformerFactory
+	// Cache sync for PVC lister
+	pvcHasSynced func() bool
+	// PVC Lister
+	pvcLister corelisters.PersistentVolumeClaimLister
 }
 
 // NewController returns a new sample controller
@@ -80,11 +89,17 @@ func NewController(
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClientset.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
+	resyncPeriod := time.Minute * 60
+	kfac := kubeinformers.NewSharedInformerFactory(kubeClientset, resyncPeriod)
+
 	controller := &controller{
 		kubeClientset:           kubeClientset,
 		snapshotPolicyClientset: snapshotPolicyClientset,
 		recorder:                recorder,
+		pvcHasSynced:            kfac.Core().V1().PersistentVolumeClaims().Informer().HasSynced,
+		pvcLister:               kfac.Core().V1().PersistentVolumeClaims().Lister(),
 	}
+	controller.kfac = kfac
 
 	// Watch snapshot objects
 	source := cache.NewListWatchFromClient(
@@ -106,7 +121,7 @@ func NewController(
 		//    calls, even if nothing changed). Otherwise, re-list will be delayed as
 		//    long as possible (until the upstream source closes the watch or times out,
 		//    or you stop the controller).
-		time.Minute*60,
+		resyncPeriod,
 
 		// Watch Event Handlers
 		cache.ResourceEventHandlerFuncs{
@@ -138,11 +153,12 @@ func (c *controller) Run(stopCh <-chan struct{}) error {
 	defer runtime.HandleCrash()
 	glog.Info("Starting SnapshotPolicy controller")
 
+	c.kfac.Start(stopCh)
 	go c.controller.Run(stopCh)
 
 	glog.Infof("Waiting for caches to sync for %s controller", "snapshot-policy")
 
-	if !cache.WaitForCacheSync(stopCh, c.controller.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, c.controller.HasSynced, c.pvcHasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Unable to sync caches for %s controller", "snapshot-policy"))
 		return nil
 	}
@@ -257,7 +273,7 @@ func (c *controller) checkPolicyTime(policy snapshotv1alpha1.SnapshotPolicy) {
 
 func (c *controller) createSnapshot(policy snapshotv1alpha1.SnapshotPolicy) {
 	glog.Infof("Creating snapshot for %s policy", policy.GetObjectMeta().GetName())
-	strat, err := strategy.CreateStrategy(c.snapshotClient, strategy.StrategyName(policy.Spec.Strategy.Name))
+	strat, err := strategy.CreateStrategy(c.snapshotClient, c.pvcLister, strategy.StrategyName(policy.Spec.Strategy.Name))
 	if err != nil {
 		glog.Errorf("Error building strategy: %s", err.Error())
 	}
@@ -267,9 +283,13 @@ func (c *controller) createSnapshot(policy snapshotv1alpha1.SnapshotPolicy) {
 		glog.Errorf("Error performing strategy: %s", err.Error())
 		return
 	}
-	c.recorder.Eventf(&policy, corev1.EventTypeNormal, strategy.EventRun, "%s successful strategy execution.", policy.GetObjectMeta().GetName())
-	policy.Status = snapshotv1alpha1.SnapshotPolicyStatus{
-		LastSnapshotTime: status.LastSnapshotTime,
+	if status == nil {
+		glog.Warningf("Didn't create any snapshots: %s", policy.Name)
+	} else {
+		c.recorder.Eventf(&policy, corev1.EventTypeNormal, strategy.EventRun, "%s successful strategy execution.", policy.GetObjectMeta().GetName())
+		policy.Status = snapshotv1alpha1.SnapshotPolicyStatus{
+			LastSnapshotTime: status.LastSnapshotTime,
+		}
+		c.updatePolicy(&policy)
 	}
-	c.updatePolicy(&policy)
 }

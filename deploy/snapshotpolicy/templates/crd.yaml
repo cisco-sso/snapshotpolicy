@@ -16,8 +16,14 @@ spec:
           properties:
             claims:
               type: array
+              nullable: true
               items:
                 type: string
+            selectors:
+              type: array
+              nullable: true
+              items:
+                type: object
             unit:
               type: string
               enum:
