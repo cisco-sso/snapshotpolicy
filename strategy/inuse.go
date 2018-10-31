@@ -19,6 +19,7 @@ package strategy
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -28,12 +29,14 @@ import (
 	uuid "github.com/google/uuid"
 	crdv1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 // The in use strategy simply creates a volume snapshot with the annotation that will set the force option
 type inUseStragey struct {
-	client *rest.RESTClient
+	client    *rest.RESTClient
+	pvcLister corelisters.PersistentVolumeClaimLister
 }
 
 const (
@@ -86,10 +89,13 @@ func (strat *inUseStragey) createSnapForPVC(policy v1alpha1.SnapshotPolicy, pvcN
 }
 
 func (strat *inUseStragey) Run(policy v1alpha1.SnapshotPolicy) (*v1alpha1.SnapshotPolicyStatus, error) {
-	defer strat.expireOld(policy)
-	var retErr error
+	pvcNames, retErr := strat.getPvcNames(policy)
+	if retErr != nil {
+		glog.Errorf("Unable to get PVCs: %v", retErr)
+	}
+	defer strat.expireOld(policy, pvcNames)
 	var retStatus *v1alpha1.SnapshotPolicyStatus
-	for _, pvcName := range policy.Spec.PVCNames {
+	for _, pvcName := range pvcNames {
 		status, err := strat.createSnapForPVC(policy, pvcName)
 		// Compile any error messages and still attempt to continue
 		if err != nil {
@@ -108,6 +114,43 @@ func (strat *inUseStragey) Run(policy v1alpha1.SnapshotPolicy) (*v1alpha1.Snapsh
 	}
 
 	return retStatus, retErr
+}
+
+func (strat *inUseStragey) getPvcNames(policy v1alpha1.SnapshotPolicy) ([]string, error) {
+	pvcNames := make(map[string]bool)
+	if policy.Spec.PVCNames != nil {
+		for _, pvcName := range *policy.Spec.PVCNames {
+			pvcNames[pvcName] = true
+		}
+	}
+	var errors []string
+	if policy.Spec.PVCLabelSelectors != nil {
+		for _, s := range *policy.Spec.PVCLabelSelectors {
+			selector, err := metav1.LabelSelectorAsSelector(&s)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Selector %v: %v", s, err))
+				continue
+			}
+			pvcs, err := strat.pvcLister.PersistentVolumeClaims(policy.Namespace).List(selector)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Selector %v: %v", selector, err))
+				continue
+			}
+			for _, pvc := range pvcs {
+				pvcNames[pvc.Name] = true
+			}
+		}
+	}
+
+	pvcArray := make([]string, 0, len(pvcNames))
+	for pvcName, _ := range pvcNames {
+		pvcArray = append(pvcArray, pvcName)
+	}
+	var err error
+	if len(errors) > 0 {
+		err = fmt.Errorf("Failed to get PVCs for policy %v/%v [%v]", policy.Namespace, policy.Name, strings.Join(errors, ", "))
+	}
+	return pvcArray, err
 }
 
 type snapshotDate struct {
@@ -172,8 +215,8 @@ func (strat *inUseStragey) deleteSnapshot(snapshot crdv1.VolumeSnapshot) {
 	}
 }
 
-func (strat *inUseStragey) expireOld(policy v1alpha1.SnapshotPolicy) {
-	for _, claim := range policy.Spec.PVCNames {
+func (strat *inUseStragey) expireOld(policy v1alpha1.SnapshotPolicy, pvcNames []string) {
+	for _, claim := range pvcNames {
 		datedSnapshots := strat.GetSortedSnapshots(policy, claim)
 		if len(datedSnapshots) > 0 {
 			for i := len(datedSnapshots) - 1; i >= int(*policy.Spec.Retention); i-- {

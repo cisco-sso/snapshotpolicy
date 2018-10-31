@@ -46,9 +46,10 @@ type Strategy struct {
 
 // SnapshotPolicySpec is the spec for a SnapshotPolicy resource
 type SnapshotPolicySpec struct {
-	PVCNames []string `json:"claims"`
-	Unit     string   `json:"unit,omitempty"`
-	Period   *int32   `json:"period,omitempty"`
+	PVCNames          *[]string               `json:"claims,omitempty"`
+	PVCLabelSelectors *[]metav1.LabelSelector `json:"selectors,omitempty"`
+	Unit              string                  `json:"unit,omitempty"`
+	Period            *int32                  `json:"period,omitempty"`
 	// Duration - Calculated duration between periods, not easily expressed in yaml form
 	Duration  time.Duration `json:"-"`
 	Retention *int32        `json:"retention,omitempty"`

@@ -19,6 +19,7 @@ package strategy
 import (
 	"fmt"
 
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 )
 
@@ -28,12 +29,13 @@ const (
 	InUse StrategyName = "inuse"
 )
 
-func CreateStrategy(config *rest.RESTClient, name StrategyName) (Strategy, error) {
+func CreateStrategy(config *rest.RESTClient, pvcLister corelisters.PersistentVolumeClaimLister, name StrategyName) (Strategy, error) {
 
 	switch name {
 	case InUse:
 		return &inUseStragey{
-				client: config,
+				client:    config,
+				pvcLister: pvcLister,
 			},
 			nil
 		// case mysql
