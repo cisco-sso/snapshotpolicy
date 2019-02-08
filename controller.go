@@ -40,6 +40,7 @@ import (
 	clientset "github.com/cisco-sso/snapshotpolicy/pkg/client/clientset/versioned"
 	snapshotscheme "github.com/cisco-sso/snapshotpolicy/pkg/client/clientset/versioned/scheme"
 	strategy "github.com/cisco-sso/snapshotpolicy/strategy"
+	csiclientset "github.com/kubernetes-csi/external-snapshotter/pkg/client/clientset/versioned"
 )
 
 const (
@@ -52,8 +53,8 @@ type controller struct {
 	kubeClientset kubernetes.Interface
 	// snapshotPolicyClientset is a clientset for our own API group
 	snapshotPolicyClientset clientset.Interface
-	// Rest client for interacting with VolumeSnapshot resources that this controller schedules
-	snapshotClient *rest.RESTClient
+	// Client for interacting with VolumeSnapshot resources that this controller schedules
+	snapshotClient strategy.SnapshotClient
 	// Indexer responsible for thread safe access to the obj store
 	indexer cache.Indexer
 	// Controller responsible for processing the FIFO queue of SnapshotPolicy objects
@@ -77,7 +78,8 @@ type controller struct {
 func NewController(
 	kubeClientset kubernetes.Interface,
 	snapshotPolicyClientset clientset.Interface,
-	snapshotClient *rest.RESTClient) *controller {
+	snapshotClient *rest.RESTClient,
+	csiClientset csiclientset.Interface) *controller {
 
 	// Create event broadcaster
 	// Add sample-controller types to the default Kubernetes Scheme so Events can be
@@ -108,7 +110,7 @@ func NewController(
 		corev1.NamespaceAll,
 		fields.Everything())
 
-	controller.snapshotClient = snapshotClient
+	controller.snapshotClient = strategy.SnapshotClient{snapshotClient, csiClientset.VolumesnapshotV1alpha1(), useCSI}
 
 	controller.indexer, controller.controller = cache.NewIndexerInformer(
 		source,
