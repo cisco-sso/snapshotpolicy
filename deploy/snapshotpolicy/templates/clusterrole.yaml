@@ -13,10 +13,18 @@ rules:
       - ""
     resources:
       - namespaces
+      - persistentvolumeclaims
+      - events
     verbs:
       - get
       - list
       - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
   - apiGroups:
       - "snapshotpolicy.ciscosso.io"
     resources:
@@ -26,6 +34,7 @@ rules:
       - "*"
   - apiGroups:
       - "volumesnapshot.external-storage.k8s.io"
+      - "snapshot.snapshot.storage.k8s.io"
     resources:
       - volumesnapshots
     verbs:

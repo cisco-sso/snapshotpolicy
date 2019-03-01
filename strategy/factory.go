@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/rest"
 )
 
 type StrategyName string
@@ -29,12 +28,12 @@ const (
 	InUse StrategyName = "inuse"
 )
 
-func CreateStrategy(config *rest.RESTClient, pvcLister corelisters.PersistentVolumeClaimLister, name StrategyName) (Strategy, error) {
+func CreateStrategy(snapshotClient SnapshotClient, pvcLister corelisters.PersistentVolumeClaimLister, name StrategyName) (Strategy, error) {
 
 	switch name {
 	case InUse:
 		return &inUseStragey{
-				client:    config,
+				client:    snapshotClient,
 				pvcLister: pvcLister,
 			},
 			nil

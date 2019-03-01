@@ -27,6 +27,7 @@ import (
 
 	clientset "github.com/cisco-sso/snapshotpolicy/pkg/client/clientset/versioned"
 	"github.com/cisco-sso/snapshotpolicy/pkg/signals"
+	csiclientset "github.com/kubernetes-csi/external-snapshotter/pkg/client/clientset/versioned"
 	volclient "github.com/kubernetes-incubator/external-storage/snapshot/pkg/client"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -34,6 +35,7 @@ import (
 var (
 	masterURL  string
 	kubeconfig string
+	useCSI     bool
 )
 
 func startMetricsServer(addr string) {
@@ -68,6 +70,11 @@ func main() {
 		glog.Fatalf("Could not get volumesnapshot client: %s", err.Error())
 	}
 
+	csiClient, err := csiclientset.NewForConfig(cfg)
+	if err != nil {
+		glog.Fatalf("Could not get csi client: %s", err.Error())
+	}
+
 	policyClient, err := clientset.NewForConfig(cfg)
 	if err != nil {
 		glog.Fatalf("Error building example clientset: %s", err.Error())
@@ -76,7 +83,8 @@ func main() {
 	controller := NewController(
 		kubeClient,
 		policyClient,
-		snapshotClient)
+		snapshotClient,
+		csiClient)
 
 	if err = controller.Run(stopCh); err != nil {
 		glog.Fatalf("Error running controller: %s", err.Error())
@@ -86,4 +94,5 @@ func main() {
 func init() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	flag.BoolVar(&useCSI, "csi", false, "Flag controlling whether to use external-storage snapshots or CSI external-snapshotter snapshots")
 }

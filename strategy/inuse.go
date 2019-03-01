@@ -27,16 +27,25 @@ import (
 	snapshotpolicy "github.com/cisco-sso/snapshotpolicy/pkg/apis/snapshotpolicy"
 	v1alpha1 "github.com/cisco-sso/snapshotpolicy/pkg/apis/snapshotpolicy/v1alpha1"
 	uuid "github.com/google/uuid"
+	csiv1alpha1 "github.com/kubernetes-csi/external-snapshotter/pkg/apis/volumesnapshot/v1alpha1"
+	csisnapshotv1alpha1 "github.com/kubernetes-csi/external-snapshotter/pkg/client/clientset/versioned/typed/volumesnapshot/v1alpha1"
 	crdv1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 // The in use strategy simply creates a volume snapshot with the annotation that will set the force option
 type inUseStragey struct {
-	client    *rest.RESTClient
+	client    SnapshotClient
 	pvcLister corelisters.PersistentVolumeClaimLister
+}
+
+type SnapshotClient struct {
+	ExternalStorageSnapshot *rest.RESTClient
+	CsiSnapshot             csisnapshotv1alpha1.VolumesnapshotV1alpha1Interface
+	UseCSI                  bool
 }
 
 const (
@@ -45,6 +54,15 @@ const (
 	ForceKey       = "snapshot.alpha.kubernetes.io/force"
 )
 
+func snapLabelSelector(policyName, claimName string) string {
+	ls := fields.SelectorFromSet(map[string]string{
+		PolicyLabelKey: policyName,
+		ClaimLabelKey:  claimName,
+	})
+
+	return ls.String()
+}
+
 func (strat *inUseStragey) createSnapForPVC(policy v1alpha1.SnapshotPolicy, pvcName string) (*v1alpha1.SnapshotPolicyStatus, error) {
 	uuid, err := uuid.NewUUID()
 	if err != nil {
@@ -52,39 +70,28 @@ func (strat *inUseStragey) createSnapForPVC(policy v1alpha1.SnapshotPolicy, pvcN
 		return nil, err
 	}
 
-	var result crdv1.VolumeSnapshot
-	err = strat.client.Post().
-		Resource(crdv1.VolumeSnapshotResourcePlural).
-		Namespace(policy.GetObjectMeta().GetNamespace()).
-		Body(&crdv1.VolumeSnapshot{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: crdv1.GroupName + "/v1",
-				Kind:       "VolumeSnapshot",
-			},
-			Metadata: metav1.ObjectMeta{
-				Name: fmt.Sprintf("%s-%s", pvcName, uuid.String()),
-				Labels: map[string]string{
-					PolicyLabelKey: policy.GetObjectMeta().GetName(),
-					ClaimLabelKey:  pvcName,
-				},
-				Annotations: map[string]string{
-					ForceKey: "true",
-				},
-			},
-			Spec: crdv1.VolumeSnapshotSpec{
-				PersistentVolumeClaimName: pvcName,
-			},
-		}).
-		Do().Into(&result)
-	if err != nil {
-		return nil, err
-	} else {
-		glog.Infof("Created new volumesnapshot %s for policy %s.",
-			result.GetObjectMeta().GetName(),
-			policy.GetObjectMeta().GetName())
-	}
 	var status v1alpha1.SnapshotPolicyStatus
-	status.LastSnapshotTime = result.GetObjectMeta().GetCreationTimestamp().Format(time.RFC3339)
+	var resultMeta metav1.Object
+	if strat.client.UseCSI {
+		result, err := strat.client.CsiSnapshot.VolumeSnapshots(policy.GetObjectMeta().GetNamespace()).
+			Create(createCSISnapshot(pvcName, uuid.String(), policy.GetObjectMeta().GetName()))
+		if err != nil {
+			return nil, err
+		}
+		resultMeta = result.GetObjectMeta()
+	} else {
+		var result crdv1.VolumeSnapshot
+		err = strat.client.ExternalStorageSnapshot.Post().
+			Resource(crdv1.VolumeSnapshotResourcePlural).
+			Namespace(policy.GetObjectMeta().GetNamespace()).
+			Body(createExternalStorageSnapshot(pvcName, uuid.String(), policy.GetObjectMeta().GetName())).
+			Do().Into(&result)
+		if err != nil {
+			return nil, err
+		}
+		resultMeta = result.GetObjectMeta()
+	}
+	status.LastSnapshotTime = resultMeta.GetCreationTimestamp().Format(time.RFC3339)
 	return &status, nil
 }
 
@@ -154,8 +161,23 @@ func (strat *inUseStragey) getPvcNames(policy v1alpha1.SnapshotPolicy) ([]string
 }
 
 type snapshotDate struct {
-	Snapshot crdv1.VolumeSnapshot
-	Time     metav1.Time
+	Snapshot    *crdv1.VolumeSnapshot
+	CSISnapshot *csiv1alpha1.VolumeSnapshot
+	Time        metav1.Time
+}
+
+func (s snapshotDate) Namespace() string {
+	if s.Snapshot != nil {
+		return s.Snapshot.GetObjectMeta().GetNamespace()
+	}
+	return s.CSISnapshot.Namespace
+}
+
+func (s snapshotDate) Name() string {
+	if s.Snapshot != nil {
+		return s.Snapshot.GetObjectMeta().GetName()
+	}
+	return s.CSISnapshot.Name
 }
 
 // dateList - A reverse sortable array of snapshotDate
@@ -174,27 +196,39 @@ func (s *dateList) Less(i, j int) bool {
 }
 
 func (strat *inUseStragey) GetSortedSnapshots(policy v1alpha1.SnapshotPolicy, claimName string) []snapshotDate {
-	existingSnaps := crdv1.VolumeSnapshotList{}
-	err := strat.client.
-		Get().
-		Resource(crdv1.VolumeSnapshotResourcePlural).
-		Do().Into(&existingSnaps)
 	dates := make(dateList, 0)
-	if err != nil {
-		glog.Infoln(err.Error())
-		return dates
-	}
-	for _, volSnap := range existingSnaps.Items {
-		// Only get the snapshots for my policy, for this claim
-		// TODO: Label selectors would be better, however strat.client does not have a clientset
-		if policyLabel, ok := volSnap.GetObjectMeta().GetLabels()[PolicyLabelKey]; ok {
-			if claimLabel, ok := volSnap.GetObjectMeta().GetLabels()[ClaimLabelKey]; ok {
-				if policyLabel == policy.GetObjectMeta().GetName() && claimLabel == claimName {
-					dates = append(dates,
-						snapshotDate{
-							Snapshot: volSnap,
-							Time:     volSnap.GetObjectMeta().GetCreationTimestamp(),
-						})
+	if strat.client.UseCSI {
+		list, err := strat.client.CsiSnapshot.VolumeSnapshots(policy.Namespace).
+			List(metav1.ListOptions{LabelSelector: snapLabelSelector(policy.GetObjectMeta().GetName(), claimName)})
+		if err != nil {
+			glog.Infoln(err)
+			return dates
+		}
+		for _, volSnap := range list.Items {
+			dates = append(dates, snapshotDate{CSISnapshot: &volSnap, Time: volSnap.CreationTimestamp})
+		}
+	} else {
+		existingSnaps := crdv1.VolumeSnapshotList{}
+		err := strat.client.ExternalStorageSnapshot.
+			Get().
+			Resource(crdv1.VolumeSnapshotResourcePlural).
+			Do().Into(&existingSnaps)
+		if err != nil {
+			glog.Infoln(err.Error())
+			return dates
+		}
+		for _, volSnap := range existingSnaps.Items {
+			// Only get the snapshots for my policy, for this claim
+			// TODO: Label selectors would be better, however strat.client does not have a clientset
+			if policyLabel, ok := volSnap.GetObjectMeta().GetLabels()[PolicyLabelKey]; ok {
+				if claimLabel, ok := volSnap.GetObjectMeta().GetLabels()[ClaimLabelKey]; ok {
+					if policyLabel == policy.GetObjectMeta().GetName() && claimLabel == claimName {
+						dates = append(dates,
+							snapshotDate{
+								Snapshot: &volSnap,
+								Time:     volSnap.GetObjectMeta().GetCreationTimestamp(),
+							})
+					}
 				}
 			}
 		}
@@ -203,15 +237,21 @@ func (strat *inUseStragey) GetSortedSnapshots(policy v1alpha1.SnapshotPolicy, cl
 	return dates
 }
 
-func (strat *inUseStragey) deleteSnapshot(snapshot crdv1.VolumeSnapshot) {
-	result := strat.client.
-		Delete().
-		Name(snapshot.GetObjectMeta().GetName()).
-		Namespace(snapshot.GetObjectMeta().GetNamespace()).
-		Resource(crdv1.VolumeSnapshotResourcePlural).
-		Do()
-	if result.Error() != nil {
-		glog.Errorf("Failed to delete snapshot %s: %s", snapshot.GetObjectMeta().GetName(), result.Error().Error())
+func (strat *inUseStragey) deleteSnapshot(namespace, name string) {
+	if strat.client.UseCSI {
+		if err := strat.client.CsiSnapshot.VolumeSnapshots(namespace).Delete(name, &metav1.DeleteOptions{}); err != nil {
+			glog.Errorf("Failed to delete snapshot %s/%s: %s", namespace, name, err)
+		}
+	} else {
+		result := strat.client.ExternalStorageSnapshot.
+			Delete().
+			Name(name).
+			Namespace(namespace).
+			Resource(crdv1.VolumeSnapshotResourcePlural).
+			Do()
+		if result.Error() != nil {
+			glog.Errorf("Failed to delete snapshot %s: %s", name, result.Error().Error())
+		}
 	}
 }
 
@@ -220,9 +260,52 @@ func (strat *inUseStragey) expireOld(policy v1alpha1.SnapshotPolicy, pvcNames []
 		datedSnapshots := strat.GetSortedSnapshots(policy, claim)
 		if len(datedSnapshots) > 0 {
 			for i := len(datedSnapshots) - 1; i >= int(*policy.Spec.Retention); i-- {
-				glog.Infof("Deleting expired snapshot %s", datedSnapshots[i].Snapshot.GetObjectMeta().GetName())
-				strat.deleteSnapshot(datedSnapshots[i].Snapshot)
+				glog.Infof("Deleting expired snapshot %s", datedSnapshots[i].Name())
+
+				strat.deleteSnapshot(datedSnapshots[i].Namespace(), datedSnapshots[i].Name())
 			}
 		}
 	}
+}
+
+func createExternalStorageSnapshot(pvcName, uuid, policy string) *crdv1.VolumeSnapshot {
+	return &crdv1.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: crdv1.GroupName + "/v1",
+			Kind:       "VolumeSnapshot",
+		},
+		Metadata: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-%s", pvcName, uuid),
+			Labels: map[string]string{
+				PolicyLabelKey: policy,
+				ClaimLabelKey:  pvcName,
+			},
+			Annotations: map[string]string{
+				ForceKey: "true",
+			},
+		},
+		Spec: crdv1.VolumeSnapshotSpec{
+			PersistentVolumeClaimName: pvcName,
+		},
+	}
+}
+
+func createCSISnapshot(pvcName, uuid, policy string) *csiv1alpha1.VolumeSnapshot {
+	snap := &csiv1alpha1.VolumeSnapshot{
+		Spec: csiv1alpha1.VolumeSnapshotSpec{
+			Source: &csiv1alpha1.TypedLocalObjectReference{
+				Kind: "PersistentVolumeClaim",
+				Name: pvcName,
+			},
+		},
+	}
+	snap.Name = fmt.Sprintf("%s-%s", pvcName, uuid)
+	snap.Labels = map[string]string{
+		PolicyLabelKey: policy,
+		ClaimLabelKey:  pvcName,
+	}
+	snap.Annotations = map[string]string{
+		ForceKey: "true",
+	}
+	return snap
 }
